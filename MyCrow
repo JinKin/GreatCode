@@ -1,0 +1,182 @@
+
+contract SafeMath {
+  function safeMul(uint a, uint b) internal returns (uint) {
+    uint c = a * b;
+    assert(a == 0 || c / a == b);
+    return c;
+  }
+
+  function safeSub(uint a, uint b) internal returns (uint) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function safeAdd(uint a, uint b) internal returns (uint) {
+    uint c = a + b;
+    assert(c>=a && c>=b);
+    return c;
+  }
+
+  function assert(bool assertion) internal {
+    if (!assertion) throw;
+  }
+}
+
+contract Token {
+    function totalSupply() constant returns (uint256 supply) {}
+    function balanceOf(address _owner) constant returns (uint256 balance) {}
+    function transfer(address _to, uint256 _value) returns (bool success) {}
+    function transferFrom(address _from, address _to, uint256 _value) returns (bool success) {}
+    function approve(address _spender, uint256 _value) returns (bool success) {}
+    function allowance(address _owner, address _spender) constant returns (uint256 remaining) {}
+    event Transfer(address indexed _from, address indexed _to, uint256 _value);
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+}
+
+contract ERC20 is Token {
+    mapping(address => uint256) balances;
+    mapping (address => mapping (address => uint256)) allowed;
+    uint256 public totalSupply;
+    
+    function transfer(address _to, uint256 _value) returns (bool success) {
+        if (balances[msg.sender] >= _value && balances[_to] + _value > balances[_to]) {
+            balances[msg.sender] -= _value;
+            balances[_to] += _value;
+            Transfer(msg.sender, _to, _value);
+            return true;
+        } else { return false; }
+    }
+    
+    function transferFrom(address _from, address _to, uint256 _value) returns (bool success) {
+        if (balances[_from] >= _value && allowed[_from][msg.sender] >= _value && balances[_to] + _value > balances[_to]) {
+            balances[_to] += _value;
+            balances[_from] -= _value;
+            allowed[_from][msg.sender] -= _value;
+            Transfer(_from, _to, _value);
+            return true;
+        } else { return false; }
+    }
+    
+    function balanceOf(address _owner) constant returns (uint256 balance) {return balances[_owner];}
+
+    function approve(address _spender, uint256 _value) returns (bool success) {
+        allowed[msg.sender][_spender] = _value;
+        Approval(msg.sender, _spender, _value);
+        return true;
+    }
+
+    function allowance(address _owner, address _spender) constant returns (uint256 remaining) {return allowed[_owner][_spender];}
+}
+
+
+contract MyCrow is ERC20, SafeMath {
+
+    string public name = "";
+    string public symbol = "";
+    uint public decimals = 18;
+    uint public startBlock;
+    uint public endBlock; 
+
+    address public founder = 0x0;
+
+    uint public etherCap = 500000 * 10**18; //max amount raised during crowdsale (5.5M USD worth of ether will be measured with market price at beginning of the crowdsale)
+    uint public transferLockup = 370285; //transfers are locked for this many blocks after endBlock (assuming 14 second blocks, this is 2 months)
+    uint public founderLockup = 2252571; //founder allocation cannot be created until this many blocks after endBlock (assuming 14 second blocks, this is 1 year)
+    uint public bountyAllocation = 2500000 * 10**18; //2.5M tokens allocated post-crowdsale for the bounty fund
+    uint public ecosystemAllocation = 5 * 10**16; //5% of token supply allocated post-crowdsale for the ecosystem fund
+    uint public founderAllocation = 10 * 10**16; //10% of token supply allocated post-crowdsale for the founder allocation
+    bool public bountyAllocated = false; //this will change to true when the bounty fund is allocated
+    bool public ecosystemAllocated = false; //this will change to true when the ecosystem fund is allocated
+    bool public founderAllocated = false; //this will change to true when the founder fund is allocated
+    uint public presaleTokenSupply = 0; //this will keep track of the token supply created during the crowdsale
+    uint public presaleEtherRaised = 0; //this will keep track of the Ether raised during the crowdsale
+    bool public halted = false; //the founder address can set this to true to halt the crowdsale due to emergency
+    event Buy(address indexed sender, uint eth, uint fbt);
+    event Withdraw(address indexed sender, address to, uint eth);
+    event AllocateFounderTokens(address indexed sender);
+    event AllocateBountyAndEcosystemTokens(address indexed sender);
+
+    function MyCrow(address founderInput, address signerInput, uint startBlockInput, uint endBlockInput) {
+        founder = founderInput;
+        startBlock = startBlockInput;
+        endBlock = endBlockInput;
+    }
+
+    function price() constant returns(uint) {
+        if (block.number>=startBlock && block.number<startBlock+250) return 170; //power hour
+        if (block.number<startBlock || block.number>endBlock) return 100; //default price
+        return 100 + 4*(endBlock - block.number)/(endBlock - startBlock + 1)*67/4; //crowdsale price
+    }
+
+    function buyRecipient(address recipient, uint8 v, bytes32 r, bytes32 s) {
+        bytes32 hash = sha256(msg.sender);
+        if (ecrecover(hash,v,r,s) != signer) throw;
+        if (block.number<startBlock || block.number>endBlock || safeAdd(presaleEtherRaised,msg.value)>etherCap || halted) throw;
+        uint tokens = safeMul(msg.value, price());
+        balances[recipient] = safeAdd(balances[recipient], tokens);
+        totalSupply = safeAdd(totalSupply, tokens);
+        presaleEtherRaised = safeAdd(presaleEtherRaised, msg.value);
+
+        // TODO: Is there a pitfall of forwarding message value like this
+        // TODO: Different address for founder deposits and founder operations (halt, unhalt)
+        // as founder opeations might be easier to perform from normal geth account
+        if (!founder.call.value(msg.value)()) throw; //immediately send Ether to founder address
+
+        Buy(recipient, msg.value, tokens);
+    }
+
+    function allocateFounderTokens() {
+        if (msg.sender!=founder) throw;
+        if (block.number <= endBlock + founderLockup) throw;
+        if (founderAllocated) throw;
+        if (!bountyAllocated || !ecosystemAllocated) throw;
+        balances[founder] = safeAdd(balances[founder], presaleTokenSupply * founderAllocation / (1 ether));
+        totalSupply = safeAdd(totalSupply, presaleTokenSupply * founderAllocation / (1 ether));
+        founderAllocated = true;
+        AllocateFounderTokens(msg.sender);
+    }
+
+    function allocateBountyAndEcosystemTokens() {
+        if (msg.sender!=founder) throw;
+        if (block.number <= endBlock) throw;
+        if (bountyAllocated || ecosystemAllocated) throw;
+        presaleTokenSupply = totalSupply;
+        balances[founder] = safeAdd(balances[founder], presaleTokenSupply * ecosystemAllocation / (1 ether));
+        totalSupply = safeAdd(totalSupply, presaleTokenSupply * ecosystemAllocation / (1 ether));
+        balances[founder] = safeAdd(balances[founder], bountyAllocation);
+        totalSupply = safeAdd(totalSupply, bountyAllocation);
+        bountyAllocated = true;
+        ecosystemAllocated = true;
+        AllocateBountyAndEcosystemTokens(msg.sender);
+    }
+
+    function halt() {
+        if (msg.sender!=founder) throw;
+        halted = true;
+    }
+
+    function unhalt() {
+        if (msg.sender!=founder) throw;
+        halted = false;
+    }
+
+    function changeFounder(address newFounder) {
+        if (msg.sender!=founder) throw;
+        founder = newFounder;
+    }
+
+    function transfer(address _to, uint256 _value) returns (bool success) {
+        if (block.number <= endBlock + transferLockup && msg.sender!=founder) throw;
+        return super.transfer(_to, _value);
+    }
+
+    function transferFrom(address _from, address _to, uint256 _value) returns (bool success) {
+        if (block.number <= endBlock + transferLockup && msg.sender!=founder) throw;
+        return super.transferFrom(_from, _to, _value);
+    }
+
+    function() {
+        throw;
+    }
+
+}
